@@ -2002,53 +2002,31 @@ def _gemv_gpu_dispatch_impl[
                 WARP_SIZE * WARPS_PER_BLOCK,
             )
             if n == 1:
-                comptime if transpose_b:
-                    _enqueue_gemv_kernel_vector[
-                        simd_width=simd_width,
-                        rows_per_warp=1,
-                        transpose_b=False,
-                        elementwise_lambda_fn=elementwise_lambda_fn,
-                        has_epilogue_fn=has_epilogue_fn,
-                        check_bounds=check_bounds_k,
-                        pdl_level=pdl_level,
-                    ](
-                        c,
-                        a,
-                        b,
-                        m,
-                        n,
-                        k,
-                        epilogue_fn,
-                        ceildiv(m, block_dim // WARP_SIZE),
-                        block_dim,
-                        ctx,
-                    )
-                else:
-                    # Runtime transpose (TileTensor.transpose needs a static
-                    # shape). `reshape` reuses b's storage, so the view keeps b's
-                    # engine.
-                    var b_tile_n_major = b.reshape(row_major(n, k))
+                # Runtime transpose (TileTensor.transpose needs a static
+                # shape). `reshape` reuses b's storage, so the view keeps b's
+                # engine.
+                var b_tile_n_major = b.reshape(row_major(n, k))
 
-                    _enqueue_gemv_kernel_vector[
-                        simd_width=simd_width,
-                        rows_per_warp=1,
-                        transpose_b=transpose_b,
-                        elementwise_lambda_fn=elementwise_lambda_fn,
-                        has_epilogue_fn=has_epilogue_fn,
-                        check_bounds=check_bounds_k,
-                        pdl_level=pdl_level,
-                    ](
-                        c,
-                        a,
-                        b_tile_n_major,
-                        m,
-                        n,
-                        k,
-                        epilogue_fn,
-                        ceildiv(m, block_dim // WARP_SIZE),
-                        block_dim,
-                        ctx,
-                    )
+                _enqueue_gemv_kernel_vector[
+                    simd_width=simd_width,
+                    rows_per_warp=1,
+                    transpose_b=transpose_b,
+                    elementwise_lambda_fn=elementwise_lambda_fn,
+                    has_epilogue_fn=has_epilogue_fn,
+                    check_bounds=check_bounds_k,
+                    pdl_level=pdl_level,
+                ](
+                    c,
+                    a,
+                    b_tile_n_major,
+                    m,
+                    n,
+                    k,
+                    epilogue_fn,
+                    ceildiv(m, block_dim // WARP_SIZE),
+                    block_dim,
+                    ctx,
+                )
             elif m == 1:
 
                 def _one_row_per_warp() raises {imm}:
@@ -2401,6 +2379,18 @@ def _gemv_gpu_impl[
     var m = shape.M
     var n = shape.N
     var k = shape.K
+
+    # A [1, K] row-major B is the same bytes as the [K, 1] column the
+    # untransposed launches read, so N == 1 never needs the transposed path.
+    comptime if transpose_b:
+        if n == 1:
+            return _gemv_gpu_impl[
+                transpose_b=False,
+                elementwise_lambda_fn=elementwise_lambda_fn,
+                has_epilogue_fn=has_epilogue_fn,
+                pdl_level=pdl_level,
+            ](c, a, b.reshape(row_major(k, Idx[1])), epilogue_fn, ctx)
+
     comptime simd_width = simd_width_of[a_type, target=get_gpu_target()]()
 
     comptime has_M = c.static_shape[0] > -1
